@@ -1,0 +1,190 @@
+# spec:
+#   inputs:
+#     sync_feature:
+#       default: "no"
+#       options: ["yes", "no"]
+#       description: "Sync FEATURE branch?"
+#     sync_dev:
+#       default: "no"
+#       options: ["yes", "no"]
+#       description: "Sync DEV branch?"
+#     sync_test:
+#       default: "no"
+#       options: ["yes", "no"]
+#       description: "Sync TEST branch?"
+#     sync_qa:
+#       default: "no"
+#       options: ["yes", "no"]
+#       description: "Sync QA branch?"
+
+# ---
+
+# sync-environment-branches:
+#   stage: deploy
+#   image: alpine:latest
+#   variables:
+#     GIT_DEPTH: 0
+#   script:
+#     - apk add --no-cache git
+#     - git config --global user.email "$GITLAB_USER_EMAIL"
+#     - git config --global user.name "$GITLAB_USER_NAME"
+#     - git remote set-url origin "https://oauth2:${SYNC_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+#     - git fetch origin
+
+#     - |
+#       # Standard Shell Loop (Alpine compatible)
+#       # We define the branch name and the corresponding input value directly
+#       for branch_info in "feature:$[[ inputs.sync_feature ]]" "dev:$[[ inputs.sync_dev ]]" "test:$[[ inputs.sync_test ]]" "qa:$[[ inputs.sync_qa ]]"; do
+        
+#         # Split the string into branch name and the 'yes/no' decision
+#         branch=$(echo $branch_info | cut -d: -f1)
+#         sync_decision=$(echo $branch_info | cut -d: -f2)
+
+#         if [ "$sync_decision" = "yes" ]; then
+#           echo "------------------------------------------------"
+#           echo "Syncing $branch because input was set to 'yes'..."
+          
+#           if git checkout -B $branch origin/$branch; then
+#             if git merge origin/$CI_DEFAULT_BRANCH --no-edit -X theirs; then
+#               git push origin $branch -o ci.skip
+#               echo "Successfully updated $branch"
+#             else
+#               echo "Merge conflict on $branch. Manual fix required."
+#               git merge --abort
+#             fi
+#           else
+#             echo "Branch $branch not found on remote."
+#           fi
+#         else
+#           echo "Skipping $branch (Input set to 'no')"
+#         fi
+#       done
+#   rules:
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /Merge branch 'hotfix'/
+#       when: always
+#     - if: $CI_PIPELINE_SOURCE == "web"
+#       when: always
+
+# # automatic merge
+# sync-environment-branches:
+#   stage: deploy
+#   image: alpine:latest
+#   variables:
+#     GIT_DEPTH: 0
+#     # Define your target branches here
+#     TARGET_BRANCHES: "feature dev test qa"
+#   script:
+#     - apk add --no-cache git
+#     - git config --global user.email "$GITLAB_USER_EMAIL"
+#     - git config --global user.name "$GITLAB_USER_NAME"
+#     - git remote set-url origin "https://oauth2:${SYNC_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+#     - git fetch origin
+
+#     - |
+#       for branch in $TARGET_BRANCHES; do
+#         echo "------------------------------------------------"
+#         echo "Automated Sync: Updating $branch with latest changes from $CI_DEFAULT_BRANCH..."
+        
+#         # Checkout the target branch
+#         if git checkout -B "$branch" "origin/$branch"; then
+#           # Merge changes. -X theirs ensures hotfix changes overwrite conflicts in env branches
+#           if git merge "origin/$CI_DEFAULT_BRANCH" --no-edit -X theirs; then
+#             git push origin "$branch" -o ci.skip
+#             echo "Successfully updated $branch"
+#           else
+#             echo "Critical: Automatic merge failed on $branch."
+#             git merge --abort
+#           fi
+#         else
+#           echo "Skip: Branch $branch does not exist on remote."
+#         fi
+#       done
+#   rules:
+#     # Trigger automatically only on hotfix merges to the default branch
+#     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /Merge branch 'hotfix'/
+#       when: always
+#     # Allow manual trigger from Web UI just in case
+#     - if: $CI_PIPELINE_SOURCE == "web"
+#       when: always
+#     - when: never
+
+spec:
+  inputs:
+    sync_feature:
+      default: "no"
+      options: ["yes", "no"]
+      description: "Sync FEATURE branch?"
+    sync_dev:
+      default: "no"
+      options: ["yes", "no"]
+      description: "Sync DEV branch?"
+    sync_test:
+      default: "no"
+      options: ["yes", "no"]
+      description: "Sync TEST branch?"
+    sync_qa:
+      default: "no"
+      options: ["yes", "no"]
+      description: "Sync QA branch?"
+
+---
+
+sync-environment-branches:
+  stage: deploy
+  image: alpine:latest
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - apk add --no-cache git
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "$GITLAB_USER_NAME"
+    - git remote set-url origin "https://oauth2:${SYNC_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    - git fetch origin
+
+    - |
+      # ❌ Fail pipeline if no branches are selected
+      if [ "$[[ inputs.sync_feature ]]" = "no" ] &&
+         [ "$[[ inputs.sync_dev ]]" = "no" ] &&
+         [ "$[[ inputs.sync_test ]]" = "no" ] &&
+         [ "$[[ inputs.sync_qa ]]" = "no" ]; then
+        echo "❌ No branches selected for sync. At least one input must be set to 'yes'."
+        exit 1
+      fi
+
+    - |
+      # Standard Shell Loop (Alpine compatible)
+      for branch_info in \
+        "feature:$[[ inputs.sync_feature ]]" \
+        "dev:$[[ inputs.sync_dev ]]" \
+        "test:$[[ inputs.sync_test ]]" \
+        "qa:$[[ inputs.sync_qa ]]"; do
+
+        branch=$(echo "$branch_info" | cut -d: -f1)
+        sync_decision=$(echo "$branch_info" | cut -d: -f2)
+
+        if [ "$sync_decision" = "yes" ]; then
+          echo "------------------------------------------------"
+          echo "Syncing $branch because input was set to 'yes'..."
+
+          if git checkout -B "$branch" "origin/$branch"; then
+            if git merge "origin/$CI_DEFAULT_BRANCH" --no-edit -X theirs; then
+              git push origin "$branch" -o ci.skip
+              echo "✅ Successfully updated $branch"
+            else
+              echo "❌ Merge conflict on $branch. Manual fix required."
+              git merge --abort
+              exit 1
+            fi
+          else
+            echo "❌ Branch $branch not found on remote."
+            exit 1
+          fi
+        else
+          echo "Skipping $branch (input set to 'no')"
+        fi
+      done
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /Merge branch 'hotfix'/
+      when: always
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: always
