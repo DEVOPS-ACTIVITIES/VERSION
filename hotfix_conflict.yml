@@ -1,0 +1,217 @@
+stages:
+  - deploy
+
+# Job to automatically sync hotfix changes from main branch to environment branches
+sync-environment-branches:
+  stage: deploy
+  image: alpine:latest
+  variables:
+    GIT_DEPTH: 0  # Full clone needed for merge operations
+    # Define your target environment branches (in reverse order of workflow)
+    TARGET_BRANCHES: "qa test dev feature"
+  script:
+    # Install git and required tools
+    - apk add --no-cache git
+    
+    # Configure git user
+    - git config --global user.email "$GITLAB_USER_EMAIL"
+    - git config --global user.name "$GITLAB_USER_NAME"
+    
+    # Set up authentication for pushing
+    - git remote set-url origin "https://oauth2:${SYNC_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"
+    
+    # Fetch all branches
+    - git fetch origin
+    
+    # Create directory for conflict reports
+    - mkdir -p conflict-reports
+    
+    # Sync each environment branch with main
+    - |
+      echo "=========================================="
+      echo "Starting automatic hotfix sync process"
+      echo "Source: $CI_DEFAULT_BRANCH"
+      echo "Targets: $TARGET_BRANCHES"
+      echo "=========================================="
+      
+      FAILED_BRANCHES=""
+      CONFLICT_BRANCHES=""
+      HAS_CONFLICTS=false
+      
+      for branch in $TARGET_BRANCHES; do
+        echo ""
+        echo "------------------------------------------------"
+        echo "Processing branch: $branch"
+        echo "------------------------------------------------"
+        
+        # Check if branch exists on remote
+        if ! git ls-remote --heads origin $branch | grep -q $branch; then
+          echo "⚠️  Skip: Branch '$branch' does not exist on remote"
+          continue
+        fi
+        
+        # Checkout the target branch
+        if git checkout -B "$branch" "origin/$branch"; then
+          echo "✓ Checked out $branch"
+          
+          # First, try merge without auto-resolution to detect conflicts
+          echo "Attempting merge to detect conflicts..."
+          if git merge "origin/$CI_DEFAULT_BRANCH" --no-commit --no-ff 2>&1; then
+            echo "✓ No conflicts detected"
+            # Complete the merge
+            git commit --no-edit -m "Merge $CI_DEFAULT_BRANCH into $branch"
+            
+            # Push changes (skip CI to prevent recursive triggers)
+            if git push origin "$branch" -o ci.skip; then
+              echo "✅ Successfully synced $branch with $CI_DEFAULT_BRANCH"
+            else
+              echo "❌ Failed to push $branch"
+              FAILED_BRANCHES="$FAILED_BRANCHES $branch"
+            fi
+          else
+            echo "⚠️  Conflicts detected on $branch"
+            HAS_CONFLICTS=true
+            CONFLICT_BRANCHES="$CONFLICT_BRANCHES $branch"
+            
+            # Create conflict report file
+            REPORT_FILE="conflict-reports/${branch}-conflicts.txt"
+            echo "Conflict Report for Branch: $branch" > "$REPORT_FILE"
+            echo "Source Branch: $CI_DEFAULT_BRANCH" >> "$REPORT_FILE"
+            echo "Merge Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> "$REPORT_FILE"
+            echo "Pipeline: $CI_PIPELINE_URL" >> "$REPORT_FILE"
+            echo "==========================================" >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            
+            # List conflicted files
+            echo "Conflicted Files:" >> "$REPORT_FILE"
+            git diff --name-only --diff-filter=U >> "$REPORT_FILE"
+            echo "" >> "$REPORT_FILE"
+            
+            # Extract detailed conflict information for each file
+            echo "Detailed Conflict Information:" >> "$REPORT_FILE"
+            echo "==========================================" >> "$REPORT_FILE"
+            
+            for conflicted_file in $(git diff --name-only --diff-filter=U); do
+              echo "" >> "$REPORT_FILE"
+              echo "FILE: $conflicted_file" >> "$REPORT_FILE"
+              echo "----------------------------------------" >> "$REPORT_FILE"
+              
+              # Extract conflict markers with line numbers
+              grep -n "^<<<<<<< HEAD\|^=======\|^>>>>>>>" "$conflicted_file" >> "$REPORT_FILE" 2>/dev/null || echo "Could not read conflict markers" >> "$REPORT_FILE"
+              
+              echo "" >> "$REPORT_FILE"
+              echo "Full conflict context:" >> "$REPORT_FILE"
+              # Show the actual conflicted sections
+              git diff "$conflicted_file" >> "$REPORT_FILE" 2>/dev/null || echo "Could not extract diff" >> "$REPORT_FILE"
+              echo "" >> "$REPORT_FILE"
+            done
+            
+            # Display summary to console
+            echo "Conflict details saved to: $REPORT_FILE"
+            echo "Conflicted files:"
+            git diff --name-only --diff-filter=U
+            
+            # Abort the conflicted merge
+            git merge --abort
+            
+            # Now merge with -X theirs to auto-resolve conflicts
+            echo "Auto-resolving conflicts using '-X theirs' strategy..."
+            if git merge "origin/$CI_DEFAULT_BRANCH" --no-edit -X theirs; then
+              echo "✓ Merged $CI_DEFAULT_BRANCH into $branch (conflicts auto-resolved)"
+              
+              # Push changes (skip CI to prevent recursive triggers)
+              if git push origin "$branch" -o ci.skip; then
+                echo "⚠️  Successfully synced $branch with $CI_DEFAULT_BRANCH (with auto-resolved conflicts)"
+              else
+                echo "❌ Failed to push $branch"
+                FAILED_BRANCHES="$FAILED_BRANCHES $branch"
+              fi
+            else
+              echo "❌ Merge failed even with -X theirs on $branch"
+              git merge --abort
+              FAILED_BRANCHES="$FAILED_BRANCHES $branch"
+            fi
+          fi
+        else
+          echo "❌ Failed to checkout $branch"
+          FAILED_BRANCHES="$FAILED_BRANCHES $branch"
+        fi
+      done
+      
+      echo ""
+      echo "=========================================="
+      echo "Sync process completed"
+      echo "=========================================="
+      
+      # Generate summary report
+      SUMMARY_FILE="conflict-reports/summary.txt"
+      echo "Hotfix Sync Summary Report" > "$SUMMARY_FILE"
+      echo "==========================================" >> "$SUMMARY_FILE"
+      echo "Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")" >> "$SUMMARY_FILE"
+      echo "Source Branch: $CI_DEFAULT_BRANCH" >> "$SUMMARY_FILE"
+      echo "Target Branches: $TARGET_BRANCHES" >> "$SUMMARY_FILE"
+      echo "Pipeline: $CI_PIPELINE_URL" >> "$SUMMARY_FILE"
+      echo "" >> "$SUMMARY_FILE"
+      
+      if [ "$HAS_CONFLICTS" = true ]; then
+        echo "⚠️  WARNING: Conflicts were detected and auto-resolved" >> "$SUMMARY_FILE"
+        echo "Branches with conflicts:$CONFLICT_BRANCHES" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "Please review the conflict reports in the artifacts." >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+      fi
+      
+      if [ -n "$FAILED_BRANCHES" ]; then
+        echo "❌ Branches that failed to sync:$FAILED_BRANCHES" >> "$SUMMARY_FILE"
+        echo "Please review and sync these branches manually" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+      fi
+      
+      # Display summary
+      cat "$SUMMARY_FILE"
+      
+      if [ -n "$FAILED_BRANCHES" ]; then
+        echo "⚠️  Branches that failed to sync:$FAILED_BRANCHES"
+        echo "Please review and sync these branches manually"
+        exit 1
+      elif [ "$HAS_CONFLICTS" = true ]; then
+        echo "⚠️  Job completed with conflicts (auto-resolved)"
+        echo "Please review conflict reports in artifacts"
+        # Exit with special code to indicate warning (allow_failure will handle this)
+        exit 0
+      else
+        echo "✅ All branches synced successfully without conflicts"
+      fi
+  
+  # Store conflict reports as artifacts
+  artifacts:
+    name: "conflict-reports-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - conflict-reports/
+    when: always
+    expire_in: 30 days
+  
+  # Allow job to succeed with warning when conflicts are auto-resolved
+  allow_failure:
+    exit_codes:
+      - 0
+  
+  # Trigger rules
+  rules:
+    # Automatically trigger when a hotfix branch is merged to main
+    # Matches: "Merge branch 'hotfix/..." or "Merge branch 'hotfix-..." or "Merge branch 'hotfix..."
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_TITLE =~ /Merge.*['\"]hotfix/
+      when: always
+    
+    # Allow manual triggering from GitLab Web UI
+    - if: $CI_PIPELINE_SOURCE == "web"
+      when: manual
+    
+    # Don't run for any other case
+    - when: never
+  
+  # Only retry on script failures, not system failures
+  retry:
+    max: 1
+    when:
+      - script_failure
