@@ -1,0 +1,54 @@
+stages:
+  - notify
+
+send_prod_alert:
+  stage: notify
+  before_script:
+    # Install jq for safe JSON construction
+    - apt-get update -qq && apt-get install -y -qq jq
+  rules:
+    # Trigger when the MR targets the exact branch named "main"
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
+      when: always
+    # Trigger when the MR targets any branch whose name starts with "prod"
+    # e.g. prod, prod-1, production, prod/hotfix
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_TARGET_BRANCH_NAME =~ /^prod/'
+      when: always
+    # If neither condition above is met, skip this job
+    - when: never
+  script:
+    # Posts a comment on the MR using a GitLab Project Access Token stored in GITLAB_TOKEN.
+    # GitLab then sends its own notification emails to the MR author, assignees, reviewers,
+    # and any project member who has subscribed to MR notifications.
+    # Requires: GITLAB_TOKEN — a GitLab Project Access Token with the 'api' scope,
+    # added as a masked CI/CD variable in Settings → CI/CD → Variables.
+    - |
+      # Validate that the MR-specific variables are set (they are only injected by GitLab
+      # when the pipeline source is a merge_request_event).
+      if [ -z "${CI_PROJECT_ID}" ] || [ -z "${CI_MERGE_REQUEST_IID}" ]; then
+        echo "ERROR: CI_PROJECT_ID or CI_MERGE_REQUEST_IID is empty."
+        echo "Both variables must be non-empty. Ensure this job runs in a merge request pipeline."
+        exit 1
+      fi
+
+      NOTE="🔔 **MR Alert** — this merge request targets the \`${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}\` branch.
+
+      | Field | Value |
+      |-------|-------|
+      | Project | ${CI_PROJECT_NAME} |
+      | MR Title | ${CI_MERGE_REQUEST_TITLE} |
+      | Author | ${CI_MERGE_REQUEST_AUTHOR} |
+      | Source → Target | \`${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}\` → \`${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}\` |
+      | MR URL | ${CI_PROJECT_URL}/-/merge_requests/${CI_MERGE_REQUEST_IID} |"
+
+      jq -n --arg body "$NOTE" '{"body": $body}' > /tmp/note.json
+
+      API_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
+      echo "Posting note to: ${API_URL}"
+
+      curl --fail-with-body \
+           --request POST \
+           --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+           --header "Content-Type: application/json" \
+           --data @/tmp/note.json \
+           "${API_URL}"
