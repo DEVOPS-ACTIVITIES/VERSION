@@ -1,0 +1,8 @@
+curl -X 'POST' \ 
+ 'http://35.200.204.168:5050/v1/upload-file-for-analyzer' \ 
+ -H 'accept: application/json' \ 
+ -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMDUzMzAiLCJleHAiOjE3NzUxMjk1NjB9.3T1eVBr58qiqaPykoqZv37za2nkvMSeFHWwkvPMD1h8' \ 
+ -H 'Content-Type: multipart/form-data' \ 
+ -F 'file=@m_Load_Contacs_for_NetNew 4.XML;type=text/xml' \ 
+ -F 'upload_type=file'
+ 
